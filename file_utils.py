@@ -1,19 +1,54 @@
+import os
+import socket
+import time
+import select
+
 def receive_all(sock, length):
-    """Получает точно заданное количество байт"""
+    """Получает точно заданное количество байт с таймаутом"""
     data = b''
+    start_time = time.time()
     while len(data) < length:
-        remaining = length - len(data)
-        packet = sock.recv(4096 if remaining > 4096 else remaining)
-        if not packet:
+        if time.time() - start_time > 300.0:
             return None
-        data += packet
+            
+        try:
+            ready = select.select([sock], [], [], 1.0)
+            if not ready[0]:
+                continue
+                
+            remaining = length - len(data)
+            packet = sock.recv(min(4096, remaining))
+            if not packet:
+                return None
+            data += packet
+        except (socket.timeout, BlockingIOError):
+            continue
+        except (ConnectionResetError, BrokenPipeError, OSError):
+            return None
+            
     return data
 
 def send_all(sock, data):
-    """Отправляет все данные"""
     total_sent = 0
     while total_sent < len(data):
-        sent = sock.send(data[total_sent:])
-        if sent == 0:
-            raise RuntimeError("Соединение разорвано")
-        total_sent += sent
+        try:
+            sent = sock.send(data[total_sent:])
+            if sent == 0:
+                raise RuntimeError("Соединение разорвано")
+            total_sent += sent
+        except (ConnectionResetError, BrokenPipeError, OSError) as e:
+            raise RuntimeError(f"Ошибка отправки: {e}")
+
+def save_file(file_name, data):
+    os.makedirs('downloads', exist_ok=True)
+    path = os.path.join('downloads', file_name)
+
+    counter = 1
+    name, ext = os.path.splitext(file_name)
+    while os.path.exists(path):
+        path = os.path.join('downloads', f"{name}_{counter}{ext}")
+        counter += 1
+
+    with open(path, 'wb') as f:
+        f.write(data)
+    return path

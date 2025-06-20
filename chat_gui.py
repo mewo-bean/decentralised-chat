@@ -2,24 +2,19 @@ import tkinter as tk
 from tkinter import ttk, scrolledtext, filedialog, messagebox
 import os
 
-
 class ChatGUI:
     def __init__(self, network_manager, port):
         self.network = network_manager
         self.port = port
-
-        # Создание главного окна
         self.root = tk.Tk()
         self.root.title(f"Децентрализованный чат (Порт: {port})")
         self.root.geometry("800x600")
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
 
-        # Стили
         style = ttk.Style()
         style.configure("TButton", padding=6)
         style.configure("TFrame", background="#f0f0f0")
 
-        # Панель управления
         control_frame = ttk.Frame(self.root)
         control_frame.pack(fill=tk.X, padx=10, pady=5)
 
@@ -37,11 +32,9 @@ class ChatGUI:
         self.port_entry.pack(side=tk.LEFT, padx=5)
         ttk.Button(control_frame, text="Подключиться", command=self.connect_to_peer).pack(side=tk.LEFT)
 
-        # Основное содержимое
         main_frame = ttk.Frame(self.root)
         main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
 
-        # Список участников
         peers_frame = ttk.LabelFrame(main_frame, text="Участники")
         peers_frame.pack(side=tk.RIGHT, fill=tk.Y, padx=(5, 0))
 
@@ -51,7 +44,6 @@ class ChatGUI:
         self.peers_tree.heading("nick", text="Ник")
         self.peers_tree.pack(fill=tk.BOTH, expand=True)
 
-        # Чат
         chat_frame = ttk.LabelFrame(main_frame, text="Чат")
         chat_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
@@ -68,26 +60,20 @@ class ChatGUI:
         ttk.Button(input_frame, text="Отправить", command=self.send_text).pack(side=tk.LEFT)
         ttk.Button(input_frame, text="Файл", command=self.send_file).pack(side=tk.LEFT, padx=(5, 0))
 
-        # Обновление интерфейса
         self.update_peers_list(self.network.get_peer_list())
-
-        # Добавляем информацию о своем подключении
         self.add_message(f"Вы подключены на порту: {port}")
 
     def change_nick(self):
-        """Изменяет ник пользователя"""
         new_nick = self.nick_entry.get()
         if new_nick:
             self.network.change_nickname(new_nick)
             self.add_message(f"Ваш ник изменен на: {new_nick}")
 
     def connect_to_peer(self):
-        """Подключается к другому пиру"""
         host = self.host_entry.get()
         try:
             port = int(self.port_entry.get())
             if self.network.connect_to_peer(host, port):
-                messagebox.showinfo("Успех", "Успешное подключение")
                 self.add_message(f"Подключено к {host}:{port}")
             else:
                 messagebox.showerror("Ошибка", f"Не удалось подключиться к {host}:{port}")
@@ -95,7 +81,6 @@ class ChatGUI:
             messagebox.showerror("Ошибка", "Некорректный порт")
 
     def send_text(self):
-        """Отправляет текстовое сообщение"""
         text = self.message_entry.get()
         if text:
             try:
@@ -106,7 +91,6 @@ class ChatGUI:
                 self.add_message(f"Ошибка отправки: {str(e)}")
 
     def send_file(self):
-        """Отправляет файл"""
         file_path = filedialog.askopenfilename()
         if file_path:
             try:
@@ -116,46 +100,54 @@ class ChatGUI:
                 self.add_message(f"Ошибка отправки файла: {str(e)}")
 
     def add_message(self, message):
-        """Добавляет сообщение в чат"""
+        self.root.after(0, self._add_message_threadsafe, message)
+    
+    def _add_message_threadsafe(self, message):
         self.chat_area.config(state=tk.NORMAL)
         self.chat_area.insert(tk.END, message + "\n")
         self.chat_area.config(state=tk.DISABLED)
         self.chat_area.yview(tk.END)
 
     def update_peers_list(self, peers):
-        """Обновляет список участников"""
-        current_items = {self.peers_tree.item(item)['text']: item 
-                        for item in self.peers_tree.get_children()}
+        self.root.after(0, self._update_peers_list_threadsafe, peers)
+    
+    def _update_peers_list_threadsafe(self, peers):
+        current_items = {}
+        for item in self.peers_tree.get_children():
+            addr = self.peers_tree.item(item)['text']
+            current_items[addr] = item
+        
+        existing_items = set(self.peers_tree.get_children())
         
         for peer in peers:
             addr = peer['address']
             if addr in current_items:
-                self.peers_tree.item(current_items[addr], values=(peer['nick'],))
+                item = current_items[addr]
+                if item in existing_items:
+                    self.peers_tree.item(item, values=(peer['nick'],))
             else:
-                self.peers_tree.insert("", tk.END, text=addr, values=(peer['nick'],))
+                new_item = self.peers_tree.insert("", tk.END, text=addr, values=(peer['nick'],))
+                current_items[addr] = new_item
         
-        current_addrs = {peer['address'] for peer in peers}
+        current_addrs = [peer['address'] for peer in peers]
         for addr, item in current_items.items():
-            if addr not in current_addrs:
-                self.peers_tree.delete(item)
+            if addr not in current_addrs and item in existing_items:
+                try:
+                    self.peers_tree.delete(item)
+                except:
+                    pass
 
     def on_closing(self):
-        """Обработка закрытия окна"""
         self.network.stop()
         self.root.destroy()
 
     def start(self):
-        """Запускает главный цикл GUI"""
         self.root.mainloop()
 
     def callback_handler(self, event, data):
-        """Обработчик событий из сети"""
-        try:
-            if event == "message":
-                self.add_message(data)
-            elif event == "update_peers":
-                self.update_peers_list(data)
-        except Exception as e:
-            print(f"Ошибка обработки callback: {e}")
-
-            re.sub()
+        if event == "message":
+            self.add_message(data)
+        elif event == "update_peers":
+            self.update_peers_list(data)
+        elif event == "debug" and self.network.debug:
+            self.add_message(f"[DEBUG] {data}")
