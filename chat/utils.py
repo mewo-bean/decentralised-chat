@@ -1,10 +1,21 @@
+# file_utils.py
+"""
+Вспомогательные функции для работы с файлами и сокетами.
+Содержит безопасные методы отправки, получения и сохранения файлов.
+"""
 import os
 import socket
 import time
 import select
 
 def receive_all(sock, length):
-    """Получает точно заданное количество байт с таймаутом"""
+    """
+    Получает точно заданное количество байт из сокета с таймаутом.
+
+    :param sock: сокет
+    :param length: количество байт
+    :return: полученные данные (bytes) или None при ошибке/таймауте
+    """
     data = b''
     start_time = time.time()
     while len(data) < length:
@@ -29,6 +40,13 @@ def receive_all(sock, length):
     return data
 
 def send_all(sock, data):
+    """
+    Отправляет все байты в сокет, обрабатывая частичную отправку и ошибки.
+
+    :param sock: сокет
+    :param data: данные (bytes)
+    :raises RuntimeError: если соединение разорвано
+    """
     total_sent = 0
     while total_sent < len(data):
         try:
@@ -40,6 +58,13 @@ def send_all(sock, data):
             raise RuntimeError(f"Ошибка отправки: {e}")
 
 def save_file(file_name, data):
+    """
+    Сохраняет данные в файл, избегая перезаписи существующих файлов.
+
+    :param file_name: имя файла
+    :param data: содержимое (bytes)
+    :return: путь к сохранённому файлу
+    """
     os.makedirs('downloads', exist_ok=True)
     path = os.path.join('downloads', file_name)
 

@@ -10,7 +10,6 @@ import os
 import time
 import uuid
 import select
-import re
 from enum import Enum
 from chat.utils import receive_all, send_all
 

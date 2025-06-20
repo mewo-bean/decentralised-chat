@@ -2,8 +2,8 @@ import argparse
 import socket
 import random
 import sys
-from chat_network import NetworkManager
-from chat_gui import ChatGUI
+from chat.network import NetworkManager
+from chat.gui import ChatGUI
 import threading
 import time
 

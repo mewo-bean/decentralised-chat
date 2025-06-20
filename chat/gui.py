@@ -1,8 +1,19 @@
+# chat_gui.py
+"""
+Графический интерфейс для P2P-чата на tkinter.
+Обеспечивает взаимодействие пользователя с сетью: отправка сообщений, файлов, отображение участников и прогресса.
+"""
 import tkinter as tk
 from tkinter import ttk, scrolledtext, filedialog, messagebox
 import os
 
 class ChatGUI:
+    """
+    Класс интерфейса чата.
+
+    :param network_manager: экземпляр NetworkManager
+    :param port: порт для отображения в заголовке
+    """
     def __init__(self, network_manager, port):
         self.network = network_manager
         self.port = port
@@ -64,12 +75,14 @@ class ChatGUI:
         self.add_message(f"Вы подключены на порту: {port}")
 
     def change_nick(self):
+        """Изменяет ник пользователя и отправляет его пир-сети."""
         new_nick = self.nick_entry.get()
         if new_nick:
             self.network.change_nickname(new_nick)
             self.add_message(f"Ваш ник изменен на: {new_nick}")
 
     def connect_to_peer(self):
+        """Обрабатывает ввод адреса и подключения к другому участнику."""
         host = self.host_entry.get()
         try:
             port = int(self.port_entry.get())
@@ -81,6 +94,7 @@ class ChatGUI:
             messagebox.showerror("Ошибка", "Некорректный порт")
 
     def send_text(self):
+        """Отправляет текстовое сообщение в сеть."""
         text = self.message_entry.get()
         if text:
             try:
@@ -91,6 +105,7 @@ class ChatGUI:
                 self.add_message(f"Ошибка отправки: {str(e)}")
 
     def send_file(self):
+        """Вызывает диалог выбора файла и отправляет его пир-сети."""
         file_path = filedialog.askopenfilename()
         if file_path:
             try:
@@ -100,6 +115,7 @@ class ChatGUI:
                 self.add_message(f"Ошибка отправки файла: {str(e)}")
 
     def add_message(self, message):
+        """Добавляет сообщение в область чата (thread-safe)."""
         self.root.after(0, self._add_message_threadsafe, message)
     
     def _add_message_threadsafe(self, message):
@@ -109,6 +125,7 @@ class ChatGUI:
         self.chat_area.yview(tk.END)
 
     def update_peers_list(self, peers):
+        """Обновляет отображение списка подключённых пиров."""
         self.root.after(0, self._update_peers_list_threadsafe, peers)
     
     def _update_peers_list_threadsafe(self, peers):
@@ -138,13 +155,21 @@ class ChatGUI:
                     pass
 
     def on_closing(self):
+        """Закрывает приложение и завершает соединение с сетью."""
         self.network.stop()
         self.root.destroy()
 
     def start(self):
+        """Запускает главный цикл интерфейса."""
         self.root.mainloop()
 
     def callback_handler(self, event, data):
+        """
+        Универсальный обработчик событий от NetworkManager.
+
+        :param event: тип события (message, update_peers, debug)
+        :param data: сопутствующие данные
+        """
         if event == "message":
             self.add_message(data)
         elif event == "update_peers":
