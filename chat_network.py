@@ -129,13 +129,11 @@ class NetworkManager:
                     continue
                     
                 header = receive_all(conn, 8)
-                if not header or len(header) < 8:
-                    if self.debug:
-                        print(f"Соединение с {addr} закрыто (пустой заголовок)")
-                    break
-
                 msg_type = MessageType(header[:4].decode())
                 length = int.from_bytes(header[4:8], 'big')
+                if msg_type == MessageType.HEARTBEAT:
+                    continue
+
                 data = receive_all(conn, length)
 
                 if not data:
@@ -295,6 +293,7 @@ class NetworkManager:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(25)
             sock.connect((host, port))
+            sock.settimeout(None)
 
             conn_info = json.dumps({
                 'conn_id': self.connection_id,
