@@ -1,7 +1,8 @@
 # tests/test_network.py
 import pytest
 import json
-from chat.network import NetworkManager, MessageType
+from chat.network import NetworkManager
+from chat.utils import save_file
 
 class DummyCallback:
     def __init__(self):
@@ -48,3 +49,13 @@ def test_get_peer_list_structure(network_manager):
     peer_list = network_manager.get_peer_list()
     assert isinstance(peer_list, list)
     assert 'address' in peer_list[0] and 'nick' in peer_list[0]
+
+def test_save_file_duplicate(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    p1 = save_file("a.txt", b"1")
+    p2 = save_file("a.txt", b"2")
+    assert p1 != p2
+    assert p1.endswith("a.txt")
+    assert p2.endswith("a_1.txt")
+    assert open(p1,'rb').read() == b"1"
+    assert open(p2,'rb').read() == b"2"

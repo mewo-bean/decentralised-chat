@@ -136,7 +136,6 @@ class NetworkManager:
     def handle_messages(self, conn, peer_id, addr):
         try:
             while self.running:
-                # Используем select для неблокирующей проверки
                 ready = select.select([conn], [], [], 5.0)
                 if not ready[0]:
                     continue
@@ -417,7 +416,6 @@ class NetworkManager:
             file_name = os.path.basename(file_path)
             file_size = os.path.getsize(file_path)
             
-            # Отправляем метаданные
             file_meta = json.dumps({
                 'name': file_name, 
                 'size': file_size
