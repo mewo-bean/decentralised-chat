@@ -32,7 +32,7 @@
 ## Структура проекта
 ```text
 project/
-├── chat/
+├── src/
 │   ├── __init__.py
 │   ├── network.py
 │   ├── gui.py
@@ -42,6 +42,7 @@ project/
 │   ├── test_utils.py
 │   └── test_network.py
 ├── main.py
+├── pytest.ini
 ├── README.md
 └── requirements.txt
 ```
