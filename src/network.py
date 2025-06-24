@@ -1,8 +1,3 @@
-# chat_network.py
-'''
-Модуль chat_network реализует сетевую логику децентрализованного P2P-чата.
-Обеспечивает обмен сообщениями, передачу файлов, поддержку пиров и пульсацию (heartbeat).
-'''
 import json
 import os
 import select
@@ -11,124 +6,110 @@ import threading
 import time
 import uuid
 from enum import Enum
-
 from src.utils import receive_all, send_all
 
-
 class MessageType(Enum):
-    '''Типы сообщений в сетевом протоколе.'''
-    TEXT = "TEXT"  # Текстовое сообщение
-    FILE_META = "FMTA"  # Метаданные файла
-    FILE_DATA = "FDAT"  # Данные файла
-    NICK = "NICK"  # Смена ника
-    PEER_LIST = "PERS"  # Список пиров
-    HEARTBEAT = "BEAT"  # Проверка соединения
-    CONNECTION_ID = "CONN"  # Установление соединения
-
+    TEXT = 'TEXT'
+    FILE_META = 'FMTA'
+    FILE_DATA = 'FDAT'
+    NICK = 'NICK'
+    PEER_LIST = 'PERS'
+    HEARTBEAT = 'BEAT'
+    CONNECTION_ID = 'CONN'
 
 class NetworkManager:
-    '''
-    Основной класс для управления сетевыми соединениями и сообщениями.
-
-    :param host: IP-адрес для прослушивания
-    :param port: Порт
-    :param gui_callback: функция для отправки событий в GUI или консоль
-    :param debug: включает отладочный вывод
-    '''
-
     def __init__(self, host, port, gui_callback, debug=False):
+        '''Инициализирует сетевой менеджер.'''
         self.host = host
         self.port = port
         self.gui_callback = gui_callback
         self.nickname = f'User_{port}'
         self.debug = debug
-
-        self.peers = {}
-        self.connection_map = {}
-        self.peer_nicks = {}
-        self.known_peers = set()
-
+        self.peers = {}  # peer_id -> (socket, (ip, port))
+        self.connection_map = {}  # (ip, port) -> peer_id
+        self.peer_nicks = {}  # peer_id -> nickname
         self.lock = threading.Lock()
         self.running = True
         self.heartbeat_interval = 5
         self.connection_id = str(uuid.uuid4())
+        self.current_files = {}
 
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.sock.bind((self.host, self.port))
+        self.sock.listen(5)
+        self.server_ip = self.sock.getsockname()[0]
 
-        try:
-            self.sock.bind((self.host, self.port))
-            self.sock.listen(5)
-        except OSError as e:
-            if 'Address already in use' in str(e):
-                raise OSError(f'Порт {self.port} уже занят!') from e
-            raise
+        if self.debug:
+            print(f'[DEBUG] Сервер на {self.server_ip}:{self.port} (ID={self.connection_id[:8]})')
 
         threading.Thread(target=self.accept_connections, daemon=True).start()
         threading.Thread(target=self.heartbeat, daemon=True).start()
 
-        if self.debug:
-            print(f'[DEBUG] Сервер запущен на {self.host}:{self.port} (ID: {self.connection_id[:8]})')
-
-        self.current_files = {}
-
     def accept_connections(self):
+        '''Принимает входящие соединения.'''
         while self.running:
             try:
                 conn, addr = self.sock.accept()
-                threading.Thread(target=self.handle_incoming_connection, args=(conn, addr), daemon=True).start()
+                threading.Thread(
+                    target=self.handle_incoming_connection,
+                    args=(conn, addr),
+                    daemon=True
+                ).start()
+            except OSError:
+                break
             except Exception as e:
-                if self.running and not isinstance(e, OSError):
-                    print(f'Ошибка при принятии соединения: {e}')
+                print(f'Ошибка accept: {e}')
 
     def handle_incoming_connection(self, conn, addr):
+        '''Обрабатывает входящее соединение.'''
         peer_id = None
         try:
             header = receive_all(conn, 8)
             if not header:
                 return
-
             msg_type = MessageType(header[:4].decode())
             length = int.from_bytes(header[4:8], 'big')
             data = receive_all(conn, length)
-
-            if not data or msg_type != MessageType.CONNECTION_ID:
+            if msg_type != MessageType.CONNECTION_ID or not data:
                 return
 
-            try:
-                conn_info = json.loads(data.decode())
-                peer_id = conn_info['conn_id']
-                peer_nick = conn_info.get('nickname', f'User_{addr[1]}')
-            except json.JSONDecodeError:
+            conn_info = json.loads(data.decode())
+            peer_id = conn_info['conn_id']
+            peer_nick = conn_info.get('nickname', f'User_{addr[1]}')
+            peer_port = conn_info.get('listen_port', addr[1])
+
+            if peer_id == self.connection_id:
+                if self.debug:
+                    print(f"[DEBUG] Игнорируем собственный CONN (ID {peer_id[:8]})")
                 return
 
             if self.debug:
-                print(f'Получен ID от {addr}: {peer_id[:8]}')
+                print(f"[DEBUG] CONN от {addr}: ID={peer_id[:8]}, nick={peer_nick}, listen_port={peer_port}")
 
             with self.lock:
                 if peer_id in self.peers:
                     if self.debug:
-                        print(f'Уже подключены к пиру {peer_id[:8]}, закрываем дубликат')
+                        print(f"[DEBUG] Дубликат {peer_id[:8]}")
                     conn.close()
                     return
-
-                conn_data = json.dumps({
+                response = json.dumps({
                     'conn_id': self.connection_id,
-                    'nickname': self.nickname
+                    'nickname': self.nickname,
+                    'listen_port': self.port
                 }).encode()
-                self.send_message(MessageType.CONNECTION_ID, conn_data, conn)
-
-                self.peers[peer_id] = (conn, addr)
-                self.connection_map[addr] = peer_id
+                self.send_message(MessageType.CONNECTION_ID, response, conn)
+                self.peers[peer_id] = (conn, (addr[0], peer_port))
+                self.connection_map[(addr[0], peer_port)] = peer_id
                 self.peer_nicks[peer_id] = peer_nick
 
-            self.send_peer_list(conn)
+            self.gui_callback('message', f'Новый участник подключился: {peer_nick}')
+            self.send_peer_list()
             self.gui_callback('update_peers', self.get_peer_list())
-
-            self.handle_messages(conn, peer_id, addr)
+            self.handle_messages(conn, peer_id, (addr[0], peer_port))
 
         except Exception as e:
-            print(f'Ошибка обработки входящего соединения: {e}')
+            print(f'Ошибка входящего соединения: {e}')
         finally:
             if peer_id is None:
                 try:
@@ -137,328 +118,229 @@ class NetworkManager:
                     pass
 
     def handle_messages(self, conn, peer_id, addr):
+        '''Получает и обрабатывает сообщения от пира.'''
         try:
             while self.running:
-                ready = select.select([conn], [], [], 5.0)
-                if not ready[0]:
+                ready, _, _ = select.select([conn], [], [], 5.0)
+                if not ready:
                     continue
-
                 header = receive_all(conn, 8)
+                if not header:
+                    break
                 msg_type = MessageType(header[:4].decode())
                 length = int.from_bytes(header[4:8], 'big')
+                data = receive_all(conn, length)
                 if msg_type == MessageType.HEARTBEAT:
                     continue
-
-                data = receive_all(conn, length)
-
                 if not data:
-                    if self.debug:
-                        print(f'Пустые данные от {addr}')
                     break
 
-                if msg_type == MessageType.FILE_META:
+                if msg_type == MessageType.TEXT:
+                    text = data.decode()
+                    self.gui_callback('message', f"{self.peer_nicks.get(peer_id, '?')}: {text}")
+                elif msg_type == MessageType.NICK:
+                    newnick = data.decode()
+                    with self.lock:
+                        self.peer_nicks[peer_id] = newnick
+                    self.gui_callback('update_peers', self.get_peer_list())
+                elif msg_type == MessageType.PEER_LIST:
+                    self.handle_peer_list(data)
+                elif msg_type == MessageType.FILE_META:
                     self.handle_file_meta(peer_id, data)
                 elif msg_type == MessageType.FILE_DATA:
                     self.handle_file_data(peer_id, data)
-                else:
-                    if msg_type == MessageType.TEXT:
-                        self.handle_text(peer_id, data)
-                    elif msg_type == MessageType.NICK:
-                        self.handle_nick_change(peer_id, data)
-                    elif msg_type == MessageType.PEER_LIST:
-                        self.handle_peer_list(data)
-                    elif msg_type == MessageType.HEARTBEAT:
-                        pass
-
-        except (ConnectionResetError, BrokenPipeError):
-            if self.debug:
-                print(f'Соединение сброшено пиром: {addr}')
         except Exception as e:
-            print(f'Ошибка обработки сообщений от {addr}: {e}')
+            if self.debug:
+                print(f"[DEBUG] handle_messages error: {e}")
         finally:
             if peer_id in self.peers:
                 self.remove_peer(peer_id)
 
-    def handle_file_meta(self, peer_id, data):
-        '''Обрабатывает метаданные файла'''
-        try:
-            file_info = json.loads(data.decode())
-            file_name = file_info['name']
-            file_size = file_info['size']
-
-            os.makedirs('downloads', exist_ok=True)
-            path = os.path.join('downloads', file_name)
-
-            counter = 1
-            base_name, ext = os.path.splitext(file_name)
-            while os.path.exists(path):
-                path = os.path.join('downloads', f'{base_name}_{counter}{ext}')
-                counter += 1
-
-            self.current_files[peer_id] = {
-                'name': os.path.basename(path),
-                'size': file_size,
-                'received': 0,
-                'file': open(path, 'wb')
-            }
-            self.gui_callback('message',
-                              f'{self.peer_nicks.get(peer_id, "Unknown")} отправляет файл: {file_name}')
-        except Exception as e:
-            print(f'Ошибка обработки метаданных файла: {e}')
-
-    def handle_file_data(self, peer_id, data):
-        '''Обрабатывает данные файла'''
-        if peer_id not in self.current_files:
-            print(f'Получены данные файла без метаданных от {peer_id}')
-            return
-
-        file_info = self.current_files[peer_id]
-        file_info['file'].write(data)
-        file_info['received'] += len(data)
-
-        if file_info['received'] >= file_info['size']:
-            file_info['file'].close()
-            self.gui_callback('message',
-                              f'Файл {file_info["name"]} получен!')
-            del self.current_files[peer_id]
-
-    def handle_text(self, peer_id, data):
-        text = data.decode()
-        self.gui_callback('message', f'{self.peer_nicks.get(peer_id, "Unknown")}: {text}')
-
-    def handle_nick_change(self, peer_id, data):
-        nick = data.decode()
-        with self.lock:
-            self.peer_nicks[peer_id] = nick
-        self.gui_callback('update_peers', self.get_peer_list())
-
     def handle_peer_list(self, data):
+        '''Обрабатывает полученный список пиров.'''
         try:
             peers = json.loads(data.decode())
-            for peer in peers:
-                peer_addr = (peer['host'], peer['port'])
-
-                if peer_addr[0] == self.host and peer_addr[1] == self.port:
+            if self.debug:
+                print(f"[DEBUG] получен PERS: {peers}")
+            for p in peers:
+                host, port = p['host'], p['port']
+                if host == self.server_ip and port == self.port:
                     continue
-
-                if not self.is_connected_to(peer['host'], peer['port']):
+                if not self.is_connected_to(host, port):
                     threading.Thread(
                         target=self.connect_to_peer,
-                        args=(peer['host'], peer['port']),
+                        args=(host, port),
                         daemon=True
                     ).start()
         except Exception as e:
-            print(f'Ошибка обработки списка пиров: {e}')
-
-    def is_connected_to(self, host, port):
-        with self.lock:
-            for _, (_, addr) in self.peers.items():
-                if addr[0] == host and addr[1] == port:
-                    return True
-            return False
+            print(f'Ошибка PERS: {e}')
 
     def send_peer_list(self, conn=None):
-        peers = []
+        '''Отправляет список пиров указанному соединению или всем.'''
         with self.lock:
-            for peer_id, (_, addr) in self.peers.items():
-                peers.append({
-                    'host': addr[0],
-                    'port': addr[1],
-                    'nick': self.peer_nicks.get(peer_id, '')
-                })
-
-            peers.append({
-                'host': self.host,
-                'port': self.port,
-                'nick': self.nickname
-            })
-
+            peers = [
+                {'host': addr[0], 'port': addr[1], 'nick': self.peer_nicks.get(pid, '')}
+                for pid, (_, addr) in self.peers.items()
+            ]
+            peers.append({'host': self.server_ip, 'port': self.port, 'nick': self.nickname})
         data = json.dumps(peers).encode()
         self.send_message(MessageType.PEER_LIST, data, conn)
 
-    def send_message(self, msg_type, data, sock=None):
-        header = msg_type.value.encode() + len(data).to_bytes(4, 'big')
-        full_data = header + data
-        try:
-            if sock:
-                send_all(sock, full_data)
-            else:
-                with self.lock:
-                    peers_copy = list(self.peers.items())
-
-                for peer_id, (peer_sock, _) in peers_copy:
-                    try:
-                        send_all(peer_sock, full_data)
-                    except Exception as e:
-                        if self.debug:
-                            print(f'Ошибка отправки пиру {peer_id[:8]}: {e}')
-                        if peer_id in self.peers:
-                            self.remove_peer(peer_id)
-        except Exception as e:
-            print(f'Ошибка отправки: {e}')
+    def get_peer_list(self):
+        '''Возвращает список пиров для GUI.'''
+        with self.lock:
+            lst = [
+                {'address': f"{addr[0]}:{addr[1]}", 'nick': self.peer_nicks.get(pid, f'User_{addr[1]}')}  
+                for pid, (_, addr) in self.peers.items()
+            ]
+        lst.append({'address': f"{self.server_ip}:{self.port}", 'nick': self.nickname})
+        return lst
 
     def connect_to_peer(self, host, port):
-        if host in ['localhost', '127.0.0.1'] and port == self.port:
+        '''Устанавливает исходящее соединение к пиру.'''
+        if host == self.server_ip and port == self.port:
             return False
-
         if self.is_connected_to(host, port):
             return False
-
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(25)
             sock.connect((host, port))
-            sock.settimeout(None)
-
-            conn_info = json.dumps({
+            info = json.dumps({
                 'conn_id': self.connection_id,
-                'nickname': self.nickname
+                'nickname': self.nickname,
+                'listen_port': self.port
             }).encode()
-            self.send_message(MessageType.CONNECTION_ID, conn_info, sock)
+            self.send_message(MessageType.CONNECTION_ID, info, sock)
 
             header = receive_all(sock, 8)
             if not header:
                 return False
-
             msg_type = MessageType(header[:4].decode())
             length = int.from_bytes(header[4:8], 'big')
             data = receive_all(sock, length)
-
-            if not data or msg_type != MessageType.CONNECTION_ID:
+            if msg_type != MessageType.CONNECTION_ID or not data:
                 return False
-
-            try:
-                conn_info = json.loads(data.decode())
-                peer_id = conn_info['conn_id']
-                peer_nick = conn_info.get('nickname', f'User_{port}')
-            except json.JSONDecodeError:
-                return False
-
-            if self.debug:
-                print(f'Успешное подключение к {host}:{port} (ID: {peer_id[:8]})')
+            resp = json.loads(data.decode())
+            peer_id = resp['conn_id']
+            peer_nick = resp.get('nickname', '')
+            peer_port = resp.get('listen_port', port)
 
             with self.lock:
                 if peer_id in self.peers:
                     sock.close()
                     return False
-
-                self.peers[peer_id] = (sock, (host, port))
-                self.connection_map[(host, port)] = peer_id
+                self.peers[peer_id] = (sock, (host, peer_port))
+                self.connection_map[(host, peer_port)] = peer_id
                 self.peer_nicks[peer_id] = peer_nick
 
             threading.Thread(
                 target=self.handle_messages,
-                args=(sock, peer_id, (host, port)),
+                args=(sock, peer_id, (host, peer_port)),
                 daemon=True
             ).start()
-
+            self.gui_callback('message', f'Новый участник подключился: {peer_nick}')
             self.send_peer_list(sock)
             self.gui_callback('update_peers', self.get_peer_list())
             return True
         except Exception as e:
             if self.debug:
-                print(f'Ошибка подключения к {host}:{port}: {e}')
+                print(f"[DEBUG] connect_to_peer error {host}:{port}: {e}")
             return False
 
-    def remove_peer(self, peer_id):
-        '''Удаляет пира при отключении'''
-        if peer_id not in self.peers:
-            return
-
-        if self.debug:
-            self.gui_callback('debug', f'Удаление пира {peer_id[:8]}')
-
-        nick = self.peer_nicks.get(peer_id, 'Unknown')
-
-        with self.lock:
-            if peer_id not in self.peers:
-                return
-
-            sock, addr = self.peers[peer_id]
-            try:
-                sock.close()
-            except:
-                pass
-
-            del self.peers[peer_id]
-            if peer_id in self.peer_nicks:
-                del self.peer_nicks[peer_id]
-            if addr in self.connection_map:
-                del self.connection_map[addr]
-
-            if peer_id in self.current_files:
-                file_info = self.current_files[peer_id]
-                file_info['file'].close()
-                os.remove(os.path.join('downloads', file_info['name']))
-                del self.current_files[peer_id]
-
-        self.send_peer_list()
-        self.gui_callback('update_peers', self.get_peer_list())
-        self.gui_callback('message', f'{nick} отключился')
-
-    def get_peer_list(self):
-        peers = []
-        with self.lock:
-            for peer_id, (_, addr) in self.peers.items():
-                peers.append({
-                    'address': f'{addr[0]}:{addr[1]}',
-                    'nick': self.peer_nicks.get(peer_id, f'User_{addr[1]}')
-                })
-            peers.append({
-                'address': f'{self.host}:{self.port}',
-                'nick': self.nickname
-            })
-        return peers
+    def send_message(self, msg_type, data, sock=None):
+        '''Упаковывает и отправляет сообщение.'''
+        packet = msg_type.value.encode() + len(data).to_bytes(4, 'big') + data
+        if sock:
+            send_all(sock, packet)
+        else:
+            with self.lock:
+                for pid, (s, _) in list(self.peers.items()):
+                    try:
+                        send_all(s, packet)
+                    except Exception:
+                        self.remove_peer(pid)
 
     def send_text(self, text):
+        '''Отправляет текстовое сообщение всем пирами.'''
         self.send_message(MessageType.TEXT, text.encode())
 
-    def send_file(self, file_path):
-        '''Отправляет файл с чанкованием'''
+    def handle_file_meta(self, peer_id, data):
+        '''Обрабатывает метаданные входящего файла.'''
         try:
-            file_name = os.path.basename(file_path)
-            file_size = os.path.getsize(file_path)
-
-            file_meta = json.dumps({
-                'name': file_name,
-                'size': file_size
-            }).encode()
-            self.send_message(MessageType.FILE_META, file_meta)
-
-            with open(file_path, 'rb') as f:
-                while True:
-                    chunk = f.read(4096)
-                    if not chunk:
-                        break
-                    self.send_message(MessageType.FILE_DATA, chunk)
-
-            return True
+            info = json.loads(data.decode())
+            name, size = info['name'], info['size']
+            os.makedirs('downloads', exist_ok=True)
+            path = os.path.join('downloads', name)
+            base, ext = os.path.splitext(name)
+            count = 1
+            while os.path.exists(path):
+                path = os.path.join('downloads', f"{base}_{count}{ext}")
+                count += 1
+            file_obj = open(path, 'wb')
+            self.current_files[peer_id] = {'file': file_obj, 'size': size, 'received': 0, 'name': os.path.basename(path)}
+            self.gui_callback('message', f"{self.peer_nicks.get(peer_id, '?')} отправляет файл: {name}")
         except Exception as e:
-            print(f'Ошибка отправки файла: {e}')
-            return False
+            print(f'Ошибка FILE_META: {e}')
+
+    def handle_file_data(self, peer_id, data):
+        '''Обрабатывает кусок данных файла.'''
+        info = self.current_files.get(peer_id)
+        if not info:
+            return
+        info['file'].write(data)
+        info['received'] += len(data)
+        if info['received'] >= info['size']:
+            info['file'].close()
+            self.gui_callback('message', f"Файл {info['name']} получен")
+            del self.current_files[peer_id]
 
     def change_nickname(self, new_nick):
+        '''Меняет ник и оповещает сеть.'''
         self.nickname = new_nick
         self.send_message(MessageType.NICK, new_nick.encode())
         self.gui_callback('update_peers', self.get_peer_list())
 
     def heartbeat(self):
+        '''Отправляет HEARTBEAT через интервалы.'''
         while self.running:
             time.sleep(self.heartbeat_interval)
             try:
                 if self.debug:
-                    print(f'[DEBUG] Отправка heartbeat')
+                    print('[DEBUG] heartbeat')
                 self.send_message(MessageType.HEARTBEAT, b'')
-            except Exception as e:
-                if self.debug:
-                    print(f'[DEBUG] Ошибка heartbeat: {e}')
+            except:
+                pass
+
+    def remove_peer(self, peer_id):
+        '''Удаляет пира и оповещает всех.'''
+        with self.lock:
+            if peer_id not in self.peers:
+                return
+            sock, addr = self.peers.pop(peer_id)
+            nick = self.peer_nicks.pop(peer_id, 'Unknown')
+            self.connection_map.pop(addr, None)
+        try:
+            sock.close()
+        except:
+            pass
+        msg = f"{nick} отключился"
+        self.send_message(MessageType.TEXT, msg.encode())
+        self.gui_callback('message', msg)
+        self.send_peer_list()
+        self.gui_callback('update_peers', self.get_peer_list())
+
+    def is_connected_to(self, host, port):
+        '''Проверяет наличие подключения.'''
+        with self.lock:
+            return (host, port) in self.connection_map
 
     def stop(self):
+        '''Останавливает менеджер и закрывает соединения.'''
         self.running = False
-        with self.lock:
-            for peer_id in list(self.peers.keys()):
-                self.remove_peer(peer_id)
         try:
             self.sock.close()
         except:
             pass
+        with self.lock:
+            for pid in list(self.peers.keys()):
+                self.remove_peer(pid)

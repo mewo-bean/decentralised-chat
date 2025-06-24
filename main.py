@@ -29,9 +29,9 @@ def start_gui(network_manager, port):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Децентрализованный P2P чат')
+    parser = argparse.ArgumentParser(description='Децентрализованный чат')
     parser.add_argument('--port', type=int, default=0, help='Порт для прослушивания (0 - случайный)')
-    parser.add_argument('--host', type=str, default='0.0.0.0', help='Хост для прослушивания')
+    parser.add_argument('--host', type=str, default='127.0.0.1', help='Хост для прослушивания')
     parser.add_argument('--nogui', action='store_true', help='Запуск в консольном режиме')
     parser.add_argument('--debug', action='store_true', help='Режим отладки')
     args = parser.parse_args()
@@ -64,6 +64,7 @@ def main():
                         network_manager.stop()
                         break
                     network_manager.send_text(message)
+                    print(f'Вы: {message}')
 
             threading.Thread(target=console_input, daemon=True).start()
             while network_manager.running:

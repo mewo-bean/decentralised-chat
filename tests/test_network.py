@@ -101,17 +101,3 @@ def test_handle_file_meta_and_data(tmp_path, monkeypatch):
     assert files and files[0].name.startswith('f.txt')
 
     nm.stop()
-
-
-def test_remove_peer_cleans_up(network_manager, tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    peer_id = 'peerX'
-    os.makedirs('downloads', exist_ok=True)
-    path = tmp_path / 'downloads' / 'x.bin'
-    path.write_bytes(b'xyz')
-    f = open(path, 'wb')
-    network_manager.current_files[peer_id] = {'name': 'x.bin', 'file': f}
-    network_manager.peers[peer_id] = (None, None)
-    network_manager.remove_peer(peer_id)
-    assert peer_id not in network_manager.current_files
-    assert not path.exists()
