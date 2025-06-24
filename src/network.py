@@ -39,6 +39,8 @@ class NetworkManager:
         self.current_files = {}
         self.chat_history = []
         self.is_host = True
+        self.pending_file = None
+        self.pending_file_name = None
 
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -178,6 +180,23 @@ class NetworkManager:
                 except:
                     pass
 
+
+    def handle_file_meta(self, peer_id, data):
+        '''Обрабатывает метаданные входящего файла.'''
+        info = json.loads(data.decode())
+        name, size = info['name'], info['size']
+        os.makedirs('downloads', exist_ok=True)
+        path = os.path.join('downloads', name)
+        base, ext = os.path.splitext(name)
+        count = 1
+        while os.path.exists(path):
+            path = os.path.join('downloads', f"{base}_{count}{ext}")
+            count += 1
+        f = open(path, 'wb')
+        self.current_files[peer_id] = {'file': f, 'size': size, 'received': 0, 'path': path}
+        self.gui_callback('message', f"{self.peer_nicks.get(peer_id, '?')} отправляет файл: {name}")
+
+
     def handle_messages(self, conn, peer_id, addr):
         '''Обрабатывает входящие сообщения.'''
         try:
@@ -185,58 +204,96 @@ class NetworkManager:
                 ready, _, _ = select.select([conn], [], [], 5.0)
                 if not ready:
                     continue
+
                 header = receive_all(conn, 8)
                 if not header:
                     break
+
                 msg_type = MessageType(header[:4].decode())
                 length = int.from_bytes(header[4:8], 'big')
-                data = receive_all(conn, length)
+                data = b''
+                if length > 0:
+                    data = receive_all(conn, length)
+                    if data is None:
+                        break
+
                 if msg_type == MessageType.HEARTBEAT:
                     continue
-                if msg_type != MessageType.CLEAR_HISTORY and not data:
-                    break
 
                 if msg_type == MessageType.TEXT:
                     text = data.decode()
                     self.gui_callback('message', text)
                     self.chat_history.append(text)
+
+                elif msg_type == MessageType.FILE_META:
+                    raw_header = msg_type.value.encode() + length.to_bytes(4, 'big')
+                    if self.is_host:
+                        with self.lock:
+                            for pid, (sock, _) in self.peers.items():
+                                if pid == peer_id:
+                                    continue
+                                try:
+                                    send_all(sock, raw_header + data)
+                                except Exception:
+                                    pass
+                    self.handle_file_meta(peer_id, data)
+                    meta = json.loads(data.decode())
+                    self.gui_callback('file_request', (peer_id, meta['name'], meta['size']))
+
+                elif msg_type == MessageType.FILE_ACCEPT:
+                    accepter = self.peer_nicks.get(peer_id, '?')
+                    notify = f'Пользователь {accepter} получил файл {self.pending_file_name}'
+                    self.send_message(MessageType.TEXT, notify.encode())
+                    self.gui_callback('message', notify)
+                    threading.Thread(target=self._send_file_data, args=(peer_id,), daemon=True).start()
+
+                elif msg_type == MessageType.FILE_DECLINE:
+                    decliner = self.peer_nicks.get(peer_id, '?')
+                    notify = f'Пользователь {decliner} отклонил файл {self.pending_file_name}'
+                    self.send_message(MessageType.TEXT, notify.encode())
+                    self.gui_callback('message', notify)
+
+                elif msg_type == MessageType.FILE_DATA:
+                    info = self.current_files.get(peer_id)
+                    if info:
+                        info['file'].write(data)
+                        info['received'] += len(data)
+                        if info['received'] >= info['size']:
+                            info['file'].close()
+                            path = info['path']
+                            self.gui_callback('message', f'Файл сохранён по: {path}')
+                            del self.current_files[peer_id]
+
                 elif msg_type == MessageType.CLEAR_HISTORY:
                     with self.lock:
                         self.chat_history.clear()
                     self.gui_callback('clear_history', None)
                     notify = 'История чата была очищена'
-                    with self.lock:
-                        self.chat_history.append(notify)
+                    self.chat_history.append(notify)
                     self.gui_callback('message', notify)
+
                 elif msg_type == MessageType.NICK:
                     newnick = data.decode()
                     with self.lock:
                         self.peer_nicks[peer_id] = newnick
                     self.send_peer_list()
                     self.gui_callback('update_peers', self.get_peer_list())
+
                 elif msg_type == MessageType.PEER_LIST:
-                    self.handle_peer_list(data)
-                elif msg_type == MessageType.FILE_META:
-                    self.handle_file_meta(peer_id, data)
-                    meta = json.loads(data.decode())
-                    self.gui_callback('file_request', (peer_id, meta['name'], meta['size']))
-                elif msg_type == MessageType.FILE_ACCEPT:
-                    threading.Thread(target=self._send_file_data, args=(peer_id,), daemon=True).start()
-                elif msg_type == MessageType.FILE_DECLINE:
-                    self.gui_callback('message', f'{self.peer_nicks.get(peer_id)} отклонил файл')
-                elif msg_type == MessageType.FILE_DATA:
-                    file_info = self.current_files.get(peer_id)
-                    if file_info:
-                        file_info['file'].write(data)
-                        file_info['received'] += len(data)
-                        if file_info['received'] >= file_info['size']:
-                            file_info['file'].close()
-                            path = file_info['path']
-                            self.gui_callback('message', f'Файл сохранён по: {path}')
-                            del self.current_files[peer_id]
+                    peers = json.loads(data.decode())
+                    gui_peers = [
+                        {'address': f"{p['host']}:{p['port']}", 'nick': p['nick']}
+                        for p in peers
+                    ]
+                    self.gui_callback('update_peers', gui_peers)
+
+                else:
+                    continue
+
         finally:
             if peer_id in self.peers:
                 self.remove_peer(peer_id)
+
 
     def send_peer_list(self, conn=None):
         '''Отправляет список пиров.'''
@@ -344,8 +401,10 @@ class NetworkManager:
         '''Инициирует передачу файла с запросом.'''
         try:
             size = os.path.getsize(file_path)
-            meta = json.dumps({'name': os.path.basename(file_path), 'size': size}).encode()
+            name = os.path.basename(file_path)
+            meta = json.dumps({'name': name, 'size': size}).encode()
             self.pending_file = file_path
+            self.pending_file_name = name
             self.send_message(MessageType.FILE_META, meta)
             return True
         except Exception as e:
@@ -364,16 +423,12 @@ class NetworkManager:
 
     def respond_file(self, peer_id, accept):
         '''Вызывается GUI: принять или отклонить файл.'''
+        sock, _ = self.peers[peer_id]
         if accept:
-            path = os.path.join('downloads', self.current_files[peer_id]['name'])
-            self.current_files[peer_id]['file'] = open(path, 'wb')
-            self.current_files[peer_id]['received'] = 0
-            self.current_files[peer_id]['size'] = self.current_files[peer_id]['size']
-            self.current_files[peer_id]['path'] = path
-            sock, _ = self.peers[peer_id]
+            info = self.current_files.get(peer_id)
+            info['path'] = info.get('path')
             self.send_message(MessageType.FILE_ACCEPT, b'', sock)
         else:
-            sock, _ = self.peers[peer_id]
             self.send_message(MessageType.FILE_DECLINE, b'', sock)
 
     def send_message(self, msg_type, data, sock=None):
