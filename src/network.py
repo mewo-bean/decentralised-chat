@@ -1,3 +1,4 @@
+# src/network.py
 import json
 import os
 import select
@@ -18,10 +19,11 @@ class MessageType(Enum):
     PEER_LIST = 'PERS'
     HEARTBEAT = 'BEAT'
     CONNECTION_ID = 'CONN'
+    CLEAR_HISTORY = 'CLRH'
 
 class NetworkManager:
     def __init__(self, host, port, gui_callback, debug=False):
-        '''Инициализирует сетевой менеджер с историей и приемом файлов.'''
+        '''Инициализирует сетевой менеджер с историей и приёмом файлов.'''
         self.host = host
         self.port = port
         self.gui_callback = gui_callback
@@ -35,7 +37,8 @@ class NetworkManager:
         self.heartbeat_interval = 5
         self.connection_id = str(uuid.uuid4())
         self.current_files = {}
-        self.chat_history = []  # хранит строки чата
+        self.chat_history = []
+        self.is_host = True
 
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -49,7 +52,7 @@ class NetworkManager:
         threading.Thread(target=self.heartbeat, daemon=True).start()
 
     def accept_connections(self):
-        '''Принимает входящие соединения и отправляет историю.'''
+        '''Принимает входящие соединения и отправляет историю только если хост.'''
         while self.running:
             try:
                 conn, addr = self.sock.accept()
@@ -65,29 +68,26 @@ class NetworkManager:
     
 
     def _on_new_connection(self, conn, addr):
-        """Handshake + отправка истории + запуск чтения сообщений."""
         peer_id, peer_addr = self._do_handshake(conn, addr)
         if not peer_id:
             conn.close()
             return
 
-        # 1) Отправляем всю историю
-        with self.lock:
-            for msg in self.chat_history:
-                hdr = MessageType.TEXT.value.encode() + len(msg.encode()).to_bytes(4,'big')
-                try:
-                    send_all(conn, hdr + msg.encode())
-                except Exception:
-                    # если не удалось — удаляем пира и выходим
-                    self.remove_peer(peer_id)
-                    return
+        if self.is_host:
+            with self.lock:
+                for msg in self.chat_history:
+                    hdr = MessageType.TEXT.value.encode() + len(msg.encode()).to_bytes(4,'big')
+                    try:
+                        send_all(conn, hdr + msg.encode())
+                    except Exception:
+                        self.remove_peer(peer_id)
+                        return
 
-        # 2) Запускаем приём новых сообщений
         self.handle_messages(conn, peer_id, peer_addr)
 
 
+
     def _do_handshake(self, conn, addr):
-        """Читает CONNECTION_ID, отвечает своим, регистрирует peer."""
         header = receive_all(conn, 8)
         if not header:
             return None, None
@@ -103,7 +103,6 @@ class NetworkManager:
         if peer_id == self.connection_id or peer_id in self.peers:
             return None, None
 
-        # отвечаем своим CONNECTION_ID
         resp = json.dumps({
             'conn_id': self.connection_id,
             'nickname': self.nickname,
@@ -123,10 +122,10 @@ class NetworkManager:
         return peer_id, (addr[0], peer_port)
 
 
+
     def _handle_connect_send_history(self, conn, addr):
         '''Обрабатывает соединение и шлет историю.'''
         self.handle_incoming_connection(conn, addr)
-        # после handshake: отправляем историю этому соединению
         for msg in self.chat_history:
             header = MessageType.TEXT.value.encode() + len(msg.encode()).to_bytes(4, 'big')
             send_all(conn, header + msg.encode())
@@ -194,13 +193,21 @@ class NetworkManager:
                 data = receive_all(conn, length)
                 if msg_type == MessageType.HEARTBEAT:
                     continue
-                if not data:
+                if msg_type != MessageType.CLEAR_HISTORY and not data:
                     break
 
                 if msg_type == MessageType.TEXT:
                     text = data.decode()
                     self.gui_callback('message', text)
                     self.chat_history.append(text)
+                elif msg_type == MessageType.CLEAR_HISTORY:
+                    with self.lock:
+                        self.chat_history.clear()
+                    self.gui_callback('clear_history', None)
+                    notify = 'История чата была очищена'
+                    with self.lock:
+                        self.chat_history.append(notify)
+                    self.gui_callback('message', notify)
                 elif msg_type == MessageType.NICK:
                     newnick = data.decode()
                     with self.lock:
@@ -214,7 +221,6 @@ class NetworkManager:
                     meta = json.loads(data.decode())
                     self.gui_callback('file_request', (peer_id, meta['name'], meta['size']))
                 elif msg_type == MessageType.FILE_ACCEPT:
-                    # отправляем данные файла после принятия
                     threading.Thread(target=self._send_file_data, args=(peer_id,), daemon=True).start()
                 elif msg_type == MessageType.FILE_DECLINE:
                     self.gui_callback('message', f'{self.peer_nicks.get(peer_id)} отклонил файл')
@@ -255,18 +261,17 @@ class NetworkManager:
 
     def connect_to_peer(self, host, port):
         """Подключается к пиру: handshake → отправка истории → handle_messages."""
-        # Не подключаемся к себе
         if host == self.server_ip and port == self.port:
             return False
-        # Не дублируем соединение
         if self.is_connected_to(host, port):
             return False
 
         try:
+            self.connected_host = (host, port)
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.connect((host, port))
+            self.is_host = False
 
-            # 1) Отправляем свой CONNECTION_ID
             info = json.dumps({
                 'conn_id': self.connection_id,
                 'nickname': self.nickname,
@@ -274,7 +279,6 @@ class NetworkManager:
             }).encode()
             self.send_message(MessageType.CONNECTION_ID, info, sock)
 
-            # 2) Читаем ответ с CONNECTION_ID
             header = receive_all(sock, 8)
             if not header:
                 sock.close()
@@ -291,7 +295,6 @@ class NetworkManager:
             peer_nick = resp.get('nickname', '')
             peer_port = resp.get('listen_port', port)
 
-            # Защита от дубликатов и самоподключений
             with self.lock:
                 if peer_id in self.peers:
                     sock.close()
@@ -300,14 +303,11 @@ class NetworkManager:
                 self.connection_map[(host, peer_port)] = peer_id
                 self.peer_nicks[peer_id] = peer_nick
 
-            # GUI: новый участник
             self.gui_callback('message', f'{peer_nick} подключился')
             self.chat_history.append(f'{peer_nick} подключился')
             self.send_peer_list(sock)
             self.gui_callback('update_peers', self.get_peer_list())
 
-
-            # 4) Запускаем приём новых сообщений
             threading.Thread(
                 target=self.handle_messages,
                 args=(sock, peer_id, (host, peer_port)),
@@ -318,26 +318,9 @@ class NetworkManager:
 
         except Exception as e:
             if self.debug:
-                print(f"[DEBUG] connect_to_peer error {host}:{port}: {e}")
+                print(f"[DEBUG] connect_to_peerа ошибка {host}:{port}: {e}")
             return False
-
-    def handle_file_meta(self, peer_id, data):
-        '''Обрабатывает метаданные входящего файла.'''
-        try:
-            info = json.loads(data.decode())
-            name, size = info['name'], info['size']
-            os.makedirs('downloads', exist_ok=True)
-            path = os.path.join('downloads', name)
-            base, ext = os.path.splitext(name)
-            count = 1
-            while os.path.exists(path):
-                path = os.path.join('downloads', f"{base}_{count}{ext}")
-                count += 1
-            file_obj = open(path, 'wb')
-            self.current_files[peer_id] = {'file': file_obj, 'size': size, 'received': 0, 'name': os.path.basename(path)}
-            self.gui_callback('message', f"{self.peer_nicks.get(peer_id, '?')} отправляет файл: {name}")
-        except Exception as e:
-            print(f'Ошибка FILE_META: {e}')
+        
 
     def handle_file_data(self, peer_id, data):
         '''Обрабатывает кусок данных файла.'''
@@ -405,6 +388,23 @@ class NetworkManager:
                         send_all(s, packet)
                     except Exception:
                         self.remove_peer(pid)
+
+    def clear_history(self):
+        '''Вызывается хозяином для ручной очистки истории у всех.'''
+        with self.lock:
+            self.chat_history.clear()
+        self.gui_callback('clear_history', None)
+        hdr = MessageType.CLEAR_HISTORY.value.encode() + (0).to_bytes(4,'big')
+        with self.lock:
+            for _, (s, _) in list(self.peers.items()):
+                try:
+                    send_all(s, hdr)
+                except Exception:
+                    pass
+        notify = 'История чата была очищена'
+        with self.lock:
+            self.chat_history.append(notify)
+        self.gui_callback('message', notify)
     
     def change_nickname(self, new_nick):
         '''Меняет ник и оповещает сеть.'''
@@ -460,22 +460,22 @@ class NetworkManager:
 
 
     def handle_peer_list(self, data):
-        '''Обрабатывает полученный список пиров.'''
+        '''Обрабатывает список пиров: обновляем GUI и (опционально) подключаемся.'''
         try:
             peers = json.loads(data.decode())
-            if self.debug:
-                print(f"[DEBUG] получен PERS: {peers}")
-            for p in peers:
-                host, port = p['host'], p['port']
-                if host == self.server_ip and port == self.port:
-                    continue
-                if not self.is_connected_to(host, port):
-                    threading.Thread(
-                        target=self.connect_to_peer,
-                        args=(host, port),
-                        daemon=True
-                    ).start()
-        except Exception as e:
-            print(f'Ошибка PERS: {e}')
+        except Exception:
+            return
 
-    
+        gui_peers = [
+            {'address': f"{p['host']}:{p['port']}", 'nick': p['nick']}
+            for p in peers
+        ]
+        self.gui_callback('update_peers', gui_peers)
+
+        for p in peers:
+             host, port = p['host'], p['port']
+             if host == self.server_ip and port == self.port: continue
+             if not self.is_connected_to(host, port):
+                 threading.Thread(target=self.connect_to_peer,
+                                  args=(host, port),
+                                  daemon=True).start()
