@@ -1,22 +1,11 @@
-# chat_gui.py
-'''
-Графический интерфейс для P2P-чата на tkinter.
-Обеспечивает взаимодействие пользователя с сетью: отправка сообщений, файлов, отображение участников и прогресса.
-'''
 import os
 import tkinter as tk
 from tkinter import ttk, scrolledtext, filedialog, messagebox
 
-
 class ChatGUI:
-    '''
-    Класс интерфейса чата.
-
-    :param network_manager: экземпляр NetworkManager
-    :param port: порт для отображения в заголовке
-    '''
-
+    '''Графический интерфейс для P2P-чата.'''  
     def __init__(self, network_manager, port):
+        '''Инициализирует GUI.'''  
         self.network = network_manager
         self.port = port
         self.root = tk.Tk()
@@ -71,20 +60,20 @@ class ChatGUI:
         self.message_entry.bind('<Return>', lambda e: self.send_text())
 
         ttk.Button(input_frame, text='Отправить', command=self.send_text).pack(side=tk.LEFT)
-        ttk.Button(input_frame, text='Файл', command=self.send_file).pack(side=tk.LEFT, padx=(5, 0))
+        ttk.Button(input_frame, text='Файл', command=self.select_file).pack(side=tk.LEFT, padx=(5, 0))
 
         self.update_peers_list(self.network.get_peer_list())
         self.add_message(f'Вы подключены на порту: {port}')
 
     def change_nick(self):
-        '''Изменяет ник пользователя и отправляет его пир-сети.'''
+        '''Изменяет ник и оповещает сеть.'''  
         new_nick = self.nick_entry.get()
         if new_nick:
             self.network.change_nickname(new_nick)
             self.add_message(f'Ваш ник изменен на: {new_nick}')
 
     def connect_to_peer(self):
-        '''Обрабатывает ввод адреса и подключения к другому участнику.'''
+        '''Подключается к другому узлу.'''
         host = self.host_entry.get()
         try:
             port = int(self.port_entry.get())
@@ -95,29 +84,22 @@ class ChatGUI:
         except ValueError:
             messagebox.showerror('Ошибка', 'Некорректный порт')
 
+    def select_file(self):
+        '''Выбирает файл и инициирует отправку.'''
+        path = filedialog.askopenfilename()
+        if path and self.network.send_file(path):
+            self.add_message(f'Запрос отправки файла: {os.path.basename(path)}')
+
     def send_text(self):
-        '''Отправляет текстовое сообщение в сеть.'''
+        '''Отправляет текстовое сообщение.'''
         text = self.message_entry.get()
         if text:
-            try:
-                self.network.send_text(text)
-                self.add_message(f'Вы: {text}')
-                self.message_entry.delete(0, tk.END)
-            except Exception as e:
-                self.add_message(f'Ошибка отправки: {str(e)}')
-
-    def send_file(self):
-        '''Вызывает диалог выбора файла и отправляет его пир-сети.'''
-        file_path = filedialog.askopenfilename()
-        if file_path:
-            try:
-                if self.network.send_file(file_path):
-                    self.add_message(f'Вы отправили файл: {os.path.basename(file_path)}')
-            except Exception as e:
-                self.add_message(f'Ошибка отправки файла: {str(e)}')
+            self.network.send_text(text)
+            self.add_message(f'Вы: {text}')
+            self.message_entry.delete(0, tk.END)
 
     def add_message(self, message):
-        '''Добавляет сообщение в область чата (thread-safe).'''
+        '''Добавляет сообщение в чат.'''
         self.root.after(0, self._add_message_threadsafe, message)
 
     def _add_message_threadsafe(self, message):
@@ -127,54 +109,43 @@ class ChatGUI:
         self.chat_area.yview(tk.END)
 
     def update_peers_list(self, peers):
-        '''Обновляет отображение списка подключённых пиров.'''
+        '''Обновляет список участников.'''
         self.root.after(0, self._update_peers_list_threadsafe, peers)
 
     def _update_peers_list_threadsafe(self, peers):
-        current_items = {}
-        for item in self.peers_tree.get_children():
-            addr = self.peers_tree.item(item)['text']
-            current_items[addr] = item
-
-        existing_items = set(self.peers_tree.get_children())
-
-        for peer in peers:
-            addr = peer['address']
-            if addr in current_items:
-                item = current_items[addr]
-                if item in existing_items:
-                    self.peers_tree.item(item, values=(peer['nick'],))
+        current = {self.peers_tree.item(i)['text']: i for i in self.peers_tree.get_children()}
+        for p in peers:
+            addr, nick = p['address'], p['nick']
+            if addr in current:
+                item = current[addr]
+                self.peers_tree.item(item, values=(nick,))
             else:
-                new_item = self.peers_tree.insert('', tk.END, text=addr, values=(peer['nick'],))
-                current_items[addr] = new_item
-
-        current_addrs = [peer['address'] for peer in peers]
-        for addr, item in current_items.items():
-            if addr not in current_addrs and item in existing_items:
-                try:
-                    self.peers_tree.delete(item)
-                except:
-                    pass
-
-    def on_closing(self):
-        '''Закрывает приложение и завершает соединение с сетью.'''
-        self.network.stop()
-        self.root.destroy()
-
-    def start(self):
-        '''Запускает главный цикл интерфейса.'''
-        self.root.mainloop()
+                self.peers_tree.insert('', tk.END, text=addr, values=(nick,))
+        for addr, item in current.items():
+            if addr not in [p['address'] for p in peers]:
+                self.peers_tree.delete(item)
 
     def callback_handler(self, event, data):
-        '''
-        Универсальный обработчик событий от NetworkManager.
-
-        :param event: тип события (message, update_peers, debug)
-        :param data: сопутствующие данные
-        '''
+        '''Обрабатывает события от NetworkManager.'''
         if event == 'message':
             self.add_message(data)
         elif event == 'update_peers':
             self.update_peers_list(data)
+        elif event == 'file_request':
+            peer_id, name, size = data
+            nick = self.network.peer_nicks.get(peer_id, '?')
+            if messagebox.askyesno('Файл', f'{nick} прислал файл "{name}" ({size} байт). Принять?'):
+                self.network.respond_file(peer_id, True)
+            else:
+                self.network.respond_file(peer_id, False)
         elif event == 'debug' and self.network.debug:
             self.add_message(f'[DEBUG] {data}')
+
+    def on_closing(self):
+        '''Закрывает приложение.'''
+        self.network.stop()
+        self.root.destroy()
+
+    def start(self):
+        '''Запускает GUI.'''
+        self.root.mainloop()
